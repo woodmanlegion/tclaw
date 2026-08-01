@@ -1,0 +1,379 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# tclaw — Termux OpenClaw Mature Maintenance Tool
+# Version: 1.0.0
+# One script to install, patch, upgrade, and manage OpenClaw on Android/Termux.
+#
+# This is the modularized repo version. Patches live under patches/ and are
+# applied by lib/patch-engine.js.
+#
+# Design intent: shipped to a remote machine in one pass, then the local agent
+# is guided to interact with and integrate it. Excessively self-documenting by
+# design — every convention, stub, and edge case is explained inline.
+#
+# Conventions:
+#   - All functions prefixed with tcw_ to avoid namespace collisions.
+#   - Every destructive or state-changing operation is idempotent.
+#   - Secrets live in ~/.openclaw/.env, never in openclaw.json.
+#   - Patches use content anchors, not hardcoded hashes, so they survive
+#     npm upgrades.
+#   - Output is human-readable and agent-parseable.
+
+set -euo pipefail
+
+# ── Configuration Stubs ──
+VERSION="1.0.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME="${HOME:-/data/data/com.termux/files/home}"
+SVDIR="${SVDIR:-$PREFIX/var/service}"
+
+OPENCLAW_PKG="$PREFIX/lib/node_modules/openclaw"
+OPENCLAW_DIST="$OPENCLAW_PKG/dist"
+OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
+OPENCLAW_ENV="$HOME/.openclaw/.env"
+OPENCLAW_SERVICE_DIR="$SVDIR/openclaw"
+OPENCLAW_RUN_SCRIPT="$OPENCLAW_SERVICE_DIR/run"
+
+# ── Terminal Styling ──
+BOLD="\033[1m"
+DIM="\033[2m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RED="\033[31m"
+CYAN="\033[36m"
+RESET="\033[0m"
+
+# ── Helpers ──
+tcw_log() { echo -e "${CYAN}[tclaw]${RESET} $*"; }
+tcw_ok()  { echo -e "${GREEN}[tclaw] ✓${RESET} $*"; }
+tcw_warn(){ echo -e "${YELLOW}[tclaw] ⚠${RESET} $*" >&2; }
+tcw_err() { echo -e "${RED}[tclaw] ✗${RESET} $*" >&2; }
+
+tcw_need_cmd() {
+    local cmd="$1"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        tcw_err "required command not found: $cmd"
+        tcw_err "Install it first, then re-run tclaw."
+        exit 1
+    fi
+}
+
+tcw_ensure_dirs() {
+    mkdir -p "$HOME/Scripts" "$HOME/Projects" "$HOME/.openclaw" "$HOME/.pi/agent/skills/local-scripts" "$SVDIR"
+}
+
+tcw_find_dist_file() {
+    # Finds a bundled dist file by glob + optional content anchor.
+    local pattern="$1"
+    local anchor="${2:-}"
+    local file=""
+    if [[ -n "$anchor" ]]; then
+        file=$(grep -rl "$anchor" "$OPENCLAW_DIST" 2>/dev/null | grep "/$(echo "$pattern" | sed 's/\*/.*/g')$" | head -1)
+    fi
+    if [[ -z "$file" ]]; then
+        file=$(find "$OPENCLAW_DIST" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -1)
+    fi
+    if [[ -z "$file" || ! -f "$file" ]]; then
+        tcw_err "no file matching $pattern in $OPENCLAW_DIST"
+        return 1
+    fi
+    echo "$file"
+}
+
+# ── Apply all patches via patch-engine ──
+tcw_patch_all() {
+    tcw_log "applying patches via patch-engine..."
+    tcw_need_cmd node
+    tcw_need_cmd sv
+    if [[ ! -d "$OPENCLAW_DIST" ]]; then
+        tcw_err "OpenClaw dist/ not found. Run: tclaw install"
+        exit 1
+    fi
+
+    node "$SCRIPT_DIR/lib/patch-engine.js" "$OPENCLAW_DIST" "$SCRIPT_DIR/patches" || {
+        tcw_err "patch-engine failed"
+        return 1
+    }
+
+    tcw_ok "all patches applied"
+}
+
+# ── Service Management ──
+tcw_ensure_service_dir() {
+    mkdir -p "$OPENCLAW_SERVICE_DIR"
+}
+
+tcw_write_run_script() {
+    tcw_ensure_service_dir
+    cat > "$OPENCLAW_RUN_SCRIPT" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+export OPENCLAW_EXEC_SHELL_SNAPSHOT=0
+export OPENCLAW_CHILD_OOM_SCORE_ADJ=0
+export PATH="$HOME/Scripts:$PREFIX/bin:$PREFIX/bin/applets:/system/bin"
+if [ -f "$OPENCLAW_ENV" ]; then
+  . "$OPENCLAW_ENV"
+fi
+exec 2>&1
+exec openclaw gateway run
+EOF
+    chmod +x "$OPENCLAW_RUN_SCRIPT"
+    tcw_ok "run script: $OPENCLAW_RUN_SCRIPT"
+}
+
+tcw_service_up()   { sv up openclaw; }
+tcw_service_down() { sv down openclaw; }
+tcw_service_restart() { sv restart openclaw; }
+tcw_service_status()  { sv status openclaw; }
+
+# ── Secrets / .env ──
+tcw_ensure_env_file() {
+    if [[ ! -f "$OPENCLAW_ENV" ]]; then
+        cat > "$OPENCLAW_ENV" <<'EOF'
+# OpenClaw secrets
+# Add tokens here; they are sourced by the runit service script.
+# Example:
+# DISCORD_BOT_TOKEN=...
+# OPENCLAW_GATEWAY_TOKEN=...
+EOF
+        chmod 600 "$OPENCLAW_ENV"
+        tcw_ok "created $OPENCLAW_ENV (add your secrets)"
+    fi
+}
+
+tcw_env_show() {
+    if [[ ! -f "$OPENCLAW_ENV" ]]; then
+        tcw_warn "no .env file at $OPENCLAW_ENV"
+        return 1
+    fi
+    tcw_log "$OPENCLAW_ENV contents (keys only):"
+    grep -E "^[A-Z_]+=" "$OPENCLAW_ENV" | cut -d= -f1 | while read -r key; do
+        echo "  $key=***"
+    done
+}
+
+# ── Full Install Cycle ──
+tcw_install() {
+    tcw_log "running full install/setup cycle..."
+    tcw_ensure_dirs
+    tcw_need_cmd node
+    tcw_need_cmd npm
+    tcw_need_cmd sv
+
+    # Install apt dependencies
+    local apt_pkgs=(python build-essential jq git curl termux-services)
+    tcw_log "installing apt packages: ${apt_pkgs[*]}"
+    pkg install -y "${apt_pkgs[@]}" || tcw_warn "some apt packages may already be installed"
+
+    # Install OpenClaw via npm
+    if [[ ! -d "$OPENCLAW_PKG" ]]; then
+        tcw_log "installing openclaw from npm..."
+        npm install -g --ignore-scripts openclaw@latest
+    else
+        tcw_log "OpenClaw already installed; will ensure patched"
+    fi
+
+    # Apply patches
+    tcw_patch_all
+
+    # Write service run script
+    tcw_write_run_script
+
+    # Ensure .env exists
+    tcw_ensure_env_file
+
+    # Start services
+    tcw_service_up
+    sleep 3
+
+    # Validate
+    tcw_status
+    tcw_ok "install cycle complete"
+    tcw_warn "Next steps:"
+    tcw_warn "  1. Add secrets to $OPENCLAW_ENV if needed."
+    tcw_warn "  2. Run 'openclaw onboard' for first-time config."
+    tcw_warn "  3. Run 'tclaw restart' after editing config."
+}
+
+# ── Upgrade Cycle ──
+tcw_update() {
+    tcw_log "running update cycle..."
+    tcw_need_cmd npm
+    npm install -g --ignore-scripts openclaw@latest
+    tcw_patch_all
+    tcw_write_run_script
+    tcw_service_restart
+    sleep 5
+    tcw_status
+    tcw_ok "update cycle complete"
+}
+
+# ── Status ──
+tcw_status() {
+    echo
+    echo -e "${BOLD}══ tclaw status ══${RESET}"
+    echo
+    echo -e "${BOLD}OpenClaw:${RESET}"
+    openclaw --version 2>/dev/null || tcw_err "openclaw CLI not found"
+    echo
+    echo -e "${BOLD}Service:${RESET}"
+    tcw_service_status || true
+    echo
+    echo -e "${BOLD}Gateway:${RESET}"
+    openclaw gateway status 2>/dev/null | grep -E "Runtime|Connectivity|Capability|Dashboard" || true
+    echo
+    echo -e "${BOLD}Patches:${RESET}"
+    local svc_file shell_env_file oom_file host_env_file
+    svc_file=$(tcw_find_dist_file "service-*.js" "GATEWAY_SERVICE_REGISTRY" 2>/dev/null) || true
+    shell_env_file=$(tcw_find_dist_file "shell-env-*.js" "DEFAULT_SHELL" 2>/dev/null) || true
+    oom_file=$(tcw_find_dist_file "linux-oom-score-*.js" 2>/dev/null) || true
+    host_env_file=$(tcw_find_dist_file "host-env-security-*.js" 2>/dev/null) || true
+
+    if [[ -n "$svc_file" ]] && grep -q "termux-services (runit)" "$svc_file" 2>/dev/null; then
+        tcw_ok "gateway service patch"
+    else
+        tcw_err "gateway service patch missing"
+    fi
+    if [[ -n "$shell_env_file" ]] && grep -q "DEFAULT_SHELL = \"$PREFIX/bin/bash\"" "$shell_env_file" 2>/dev/null; then
+        tcw_ok "shell-env patch"
+    else
+        tcw_err "shell-env patch missing"
+    fi
+    if [[ -n "$oom_file" ]] && grep -q "OOM_SCORE_WRAP_SHELL = \"$PREFIX/bin/bash\"" "$oom_file" 2>/dev/null; then
+        tcw_ok "linux-oom-score patch"
+    else
+        tcw_err "linux-oom-score patch missing"
+    fi
+    if [[ -n "$host_env_file" ]] && ! grep -q '"LD_"' "$host_env_file" 2>/dev/null; then
+        tcw_ok "host-env-security patch (LD_ unblocked)"
+    else
+        tcw_err "host-env-security patch missing"
+    fi
+    echo
+    echo -e "${BOLD}.env:${RESET}"
+    if [[ -f "$OPENCLAW_ENV" ]]; then
+        tcw_env_show
+    else
+        tcw_warn "$OPENCLAW_ENV not found"
+    fi
+}
+
+# ── Logs ──
+tcw_logs() {
+    local logdir logfile
+    logdir=$(ls -td "$PREFIX"/tmp/openclaw-*/ 2>/dev/null | head -1)
+    if [[ -z "$logdir" ]]; then
+        tcw_err "no openclaw log directory found"
+        return 1
+    fi
+    logfile=$(ls -t "$logdir"/openclaw-*.log 2>/dev/null | head -1)
+    if [[ -z "$logfile" ]]; then
+        tcw_err "no log file found in $logdir"
+        return 1
+    fi
+    tcw_log "tailing $logfile"
+    tail -f "$logfile"
+}
+
+# ── Doctor ──
+tcw_doctor() {
+    openclaw doctor "$@"
+}
+
+# ── SMS Channel Toggle ──
+tcw_sms_set() {
+    local state="$1"  # "true" or "false"
+    local label="$2"  # "on" or "off"
+    if [[ ! -f "$OPENCLAW_CONFIG" ]]; then
+        tcw_err "openclaw.json not found: $OPENCLAW_CONFIG"
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        tcw_err "python3 required to edit openclaw.json"
+        return 1
+    fi
+    python3 - "$state" <<'PYEOF'
+import json, sys
+path = "/data/data/com.termux/files/home/.openclaw/openclaw.json"
+state = sys.argv[1] == "true"
+with open(path) as f:
+    cfg = json.load(f)
+cfg.setdefault("channels", {}).setdefault("sms", {})["enabled"] = state
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+    tcw_ok "SMS channel ${label} — run 'tclaw restart' to apply"
+}
+
+tcw_sms_on()  { tcw_sms_set true  on;  }
+tcw_sms_off() { tcw_sms_set false off; }
+
+tcw_sms_status() {
+    if [[ ! -f "$OPENCLAW_CONFIG" ]]; then
+        tcw_warn "openclaw.json not found"
+        return 1
+    fi
+    local enabled
+    enabled=$(python3 -c "
+import json
+with open('$OPENCLAW_CONFIG') as f:
+    cfg = json.load(f)
+print(cfg.get('channels', {}).get('sms', {}).get('enabled', False))
+" 2>/dev/null)
+    if [[ "$enabled" == "True" ]]; then
+        tcw_ok "SMS channel: enabled"
+    else
+        tcw_warn "SMS channel: disabled"
+    fi
+}
+
+# ── Help ──
+tcw_help() {
+    echo -e "${BOLD}tclaw — Termux OpenClaw maintenance tool v$VERSION${RESET}"
+    echo
+    echo "Commands:"
+    echo "  install      Full install/setup cycle"
+    echo "  patch        Apply all OpenClaw Termux patches"
+    echo "  update       npm update + patch + restart"
+    echo "  status       Show service, gateway, and patch status"
+    echo "  start        sv up openclaw"
+    echo "  stop         sv down openclaw"
+    echo "  restart      sv restart openclaw"
+    echo "  logs         Tail the gateway log file"
+    echo "  doctor       Run openclaw doctor"
+    echo "  env          Show .env keys (values hidden)"
+    echo "  sms-on       Enable SMS channel plugin in openclaw.json"
+    echo "  sms-off      Disable SMS channel plugin in openclaw.json"
+    echo "  sms-status   Show SMS channel enabled state"
+    echo "  help / ?     Show this help"
+    echo
+    echo "Key files:"
+    echo "  $SCRIPT_DIR/tclaw           this script"
+    echo "  $OPENCLAW_CONFIG               OpenClaw config"
+    echo "  $OPENCLAW_ENV                  secrets"
+    echo "  $OPENCLAW_RUN_SCRIPT           runit service script"
+    echo "  ~/Projects/41_openclaw-sms-channel/plugin/  SMS channel plugin"
+}
+
+# ── Main Dispatch ──
+main() {
+    local cmd="${1:-help}"
+    case "$cmd" in
+        install)     tcw_install "$@" ;;
+        patch)       tcw_patch_all "$@" ;;
+        update)      tcw_update "$@" ;;
+        status)      tcw_status "$@" ;;
+        start)       tcw_service_up ;;
+        stop)        tcw_service_down ;;
+        restart)     tcw_service_restart ;;
+        logs)        tcw_logs ;;
+        doctor)      tcw_doctor "$@" ;;
+        env)         tcw_env_show ;;
+        sms-on)      tcw_sms_on ;;
+        sms-off)     tcw_sms_off ;;
+        sms-status)  tcw_sms_status ;;
+        help|--help|-h|'?'|'/') tcw_help ;;
+        *)           tcw_err "unknown command: $cmd"; tcw_help; exit 1 ;;
+    esac
+}
+
+main "$@"
