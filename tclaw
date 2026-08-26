@@ -27,6 +27,7 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
 SVDIR="${SVDIR:-$PREFIX/var/service}"
 
+OPENCLAW_PINNED_VERSION="2026.7.1-2"
 OPENCLAW_PKG="$PREFIX/lib/node_modules/openclaw"
 OPENCLAW_DIST="$OPENCLAW_PKG/dist"
 OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
@@ -153,6 +154,13 @@ tcw_env_show() {
 
 # ── Full Install Cycle ──
 tcw_install() {
+    local use_latest=0
+    local use_fork=0
+    for arg in "$@"; do
+        [[ "$arg" == "--latest" ]] && use_latest=1
+        [[ "$arg" == "--fork"   ]] && use_fork=1
+    done
+
     tcw_log "running full install/setup cycle..."
     tcw_ensure_dirs
     tcw_need_cmd node
@@ -164,10 +172,24 @@ tcw_install() {
     tcw_log "installing apt packages: ${apt_pkgs[*]}"
     pkg install -y "${apt_pkgs[@]}" || tcw_warn "some apt packages may already be installed"
 
-    # Install OpenClaw via npm
-    if [[ ! -d "$OPENCLAW_PKG" ]]; then
-        tcw_log "installing openclaw from npm..."
-        npm install -g --ignore-scripts openclaw@latest
+    # Install OpenClaw
+    if [[ ! -d "$OPENCLAW_PKG" ]] || [[ "$use_fork" -eq 1 ]] || [[ "$use_latest" -eq 1 ]]; then
+        if [[ "$use_fork" -eq 1 && "$use_latest" -eq 1 ]]; then
+            tcw_log "installing openclaw from fork HEAD (github:woodmanlegion/openclaw)..."
+            tcw_warn "Fork patches are pre-applied — skipping post-install patch step."
+            npm install -g --ignore-scripts "github:woodmanlegion/openclaw"
+        elif [[ "$use_fork" -eq 1 ]]; then
+            tcw_log "installing openclaw from fork (pinned tag $OPENCLAW_PINNED_VERSION)..."
+            tcw_warn "Fork patches are pre-applied — skipping post-install patch step."
+            npm install -g --ignore-scripts "github:woodmanlegion/openclaw#v$OPENCLAW_PINNED_VERSION"
+        elif [[ "$use_latest" -eq 1 ]]; then
+            tcw_warn "Installing openclaw@latest — patches may break on upstream changes."
+            npm install -g --ignore-scripts openclaw@latest
+        else
+            tcw_log "installing openclaw@$OPENCLAW_PINNED_VERSION (pinned, stable)..."
+            tcw_warn "Pinned to $OPENCLAW_PINNED_VERSION. Use --latest or --fork --latest to override."
+            npm install -g --ignore-scripts "openclaw@$OPENCLAW_PINNED_VERSION"
+        fi
     else
         tcw_log "OpenClaw already installed; will ensure patched"
     fi
@@ -196,9 +218,30 @@ tcw_install() {
 
 # ── Upgrade Cycle ──
 tcw_update() {
+    local use_latest=0
+    local use_fork=0
+    for arg in "$@"; do
+        [[ "$arg" == "--latest" ]] && use_latest=1
+        [[ "$arg" == "--fork"   ]] && use_fork=1
+    done
+
     tcw_log "running update cycle..."
     tcw_need_cmd npm
-    npm install -g --ignore-scripts openclaw@latest
+
+    if [[ "$use_fork" -eq 1 && "$use_latest" -eq 1 ]]; then
+        tcw_log "updating openclaw from fork HEAD..."
+        npm install -g --ignore-scripts "github:woodmanlegion/openclaw"
+    elif [[ "$use_fork" -eq 1 ]]; then
+        tcw_log "updating openclaw from fork (pinned tag $OPENCLAW_PINNED_VERSION)..."
+        npm install -g --ignore-scripts "github:woodmanlegion/openclaw#v$OPENCLAW_PINNED_VERSION"
+    elif [[ "$use_latest" -eq 1 ]]; then
+        tcw_warn "Updating to openclaw@latest — patches may break on upstream changes."
+        npm install -g --ignore-scripts openclaw@latest
+    else
+        tcw_log "updating openclaw to pinned version $OPENCLAW_PINNED_VERSION..."
+        npm install -g --ignore-scripts "openclaw@$OPENCLAW_PINNED_VERSION"
+    fi
+
     tcw_patch_all
     tcw_write_run_script
     tcw_service_restart
@@ -329,11 +372,18 @@ print(cfg.get('channels', {}).get('sms', {}).get('enabled', False))
 # ── Help ──
 tcw_help() {
     echo -e "${BOLD}tclaw — Termux OpenClaw maintenance tool v$VERSION${RESET}"
+    echo -e "  Pinned version: ${CYAN}$OPENCLAW_PINNED_VERSION${RESET}"
     echo
     echo "Commands:"
-    echo "  install      Full install/setup cycle"
-    echo "  patch        Apply all OpenClaw Termux patches"
-    echo "  update       npm update + patch + restart"
+    echo "  install               Install pinned openclaw@$OPENCLAW_PINNED_VERSION from npm + patch"
+    echo "  install --latest      Install openclaw@latest from npm + patch (risky)"
+    echo "  install --fork        Install pinned version from woodmanlegion/openclaw fork (patches pre-applied)"
+    echo "  install --fork --latest  Install fork HEAD (patches pre-applied)"
+    echo "  patch                 Apply all Termux patches to installed openclaw"
+    echo "  update                Re-install pinned version + patch + restart"
+    echo "  update --latest       Update to openclaw@latest + patch + restart (risky)"
+    echo "  update --fork         Update from fork pinned tag + restart"
+    echo "  update --fork --latest  Update from fork HEAD + restart"
     echo "  status       Show service, gateway, and patch status"
     echo "  start        sv up openclaw"
     echo "  stop         sv down openclaw"
@@ -358,9 +408,9 @@ tcw_help() {
 main() {
     local cmd="${1:-help}"
     case "$cmd" in
-        install)     tcw_install "$@" ;;
-        patch)       tcw_patch_all "$@" ;;
-        update)      tcw_update "$@" ;;
+        install)     shift; tcw_install "$@" ;;
+        patch)       tcw_patch_all ;;
+        update)      shift; tcw_update "$@" ;;
         status)      tcw_status "$@" ;;
         start)       tcw_service_up ;;
         stop)        tcw_service_down ;;
