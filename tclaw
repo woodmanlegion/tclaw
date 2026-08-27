@@ -179,9 +179,9 @@ tcw_install() {
             tcw_warn "Fork patches are pre-applied — skipping post-install patch step."
             npm install -g --ignore-scripts "github:woodmanlegion/openclaw"
         elif [[ "$use_fork" -eq 1 ]]; then
-            tcw_log "installing openclaw from fork (pinned tag $OPENCLAW_PINNED_VERSION)..."
+            tcw_log "installing openclaw from fork (termux/stable)..."
             tcw_warn "Fork patches are pre-applied — skipping post-install patch step."
-            npm install -g --ignore-scripts "github:woodmanlegion/openclaw#v$OPENCLAW_PINNED_VERSION"
+            npm install -g --ignore-scripts "github:woodmanlegion/openclaw#termux/stable"
         elif [[ "$use_latest" -eq 1 ]]; then
             tcw_warn "Installing openclaw@latest — patches may break on upstream changes."
             npm install -g --ignore-scripts openclaw@latest
@@ -232,8 +232,8 @@ tcw_update() {
         tcw_log "updating openclaw from fork HEAD..."
         npm install -g --ignore-scripts "github:woodmanlegion/openclaw"
     elif [[ "$use_fork" -eq 1 ]]; then
-        tcw_log "updating openclaw from fork (pinned tag $OPENCLAW_PINNED_VERSION)..."
-        npm install -g --ignore-scripts "github:woodmanlegion/openclaw#v$OPENCLAW_PINNED_VERSION"
+        tcw_log "updating openclaw from fork (termux/stable)..."
+        npm install -g --ignore-scripts "github:woodmanlegion/openclaw#termux/stable"
     elif [[ "$use_latest" -eq 1 ]]; then
         tcw_warn "Updating to openclaw@latest — patches may break on upstream changes."
         npm install -g --ignore-scripts openclaw@latest
