@@ -22,7 +22,7 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION="2026.08.29_01"
+VERSION="2026.08.30_01"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
@@ -32,6 +32,7 @@ OPENCLAW_PINNED_VERSION="2026.7.1-2"
 OPENCLAW_PKG="$PREFIX/lib/node_modules/openclaw"
 OPENCLAW_DIST="$OPENCLAW_PKG/dist"
 OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
+WORKSPACE_BIN="$HOME/.openclaw/workspace/bin"
 OPENCLAW_ENV="$HOME/.openclaw/.env"
 OPENCLAW_SERVICE_DIR="$SVDIR/openclaw"
 OPENCLAW_RUN_SCRIPT="$OPENCLAW_SERVICE_DIR/run"
@@ -98,13 +99,14 @@ tcw_need_cmd() {
 
 tcw_ensure_dirs() {
     mkdir -p \
+        "$WORKSPACE_BIN" \
         "$USER_BIN" \
         "$HOME/Projects" \
         "$HOME/.openclaw" \
         "$HOME/.pi/agent/skills/local-scripts" \
         "$TCW_LOG_DIR" \
         "$SVDIR"
-    tcw_ok "directories ensured (user bin: $USER_BIN)"
+    tcw_ok "directories ensured (workspace bin: $WORKSPACE_BIN, user bin: $USER_BIN)"
 }
 
 tcw_find_dist_file() {
@@ -150,11 +152,12 @@ tcw_ensure_service_dir() {
 tcw_write_run_script() {
     tcw_ensure_service_dir
     local user_bin="$USER_BIN"
+    local workspace_bin="$WORKSPACE_BIN"
     cat > "$OPENCLAW_RUN_SCRIPT" <<EOF
 #!/data/data/com.termux/files/usr/bin/sh
 export OPENCLAW_EXEC_SHELL_SNAPSHOT=0
 export OPENCLAW_CHILD_OOM_SCORE_ADJ=0
-export PATH="${user_bin}:${PREFIX}/bin:${PREFIX}/bin/applets:/system/bin"
+export PATH="${workspace_bin}:${user_bin}:${PREFIX}/bin:${PREFIX}/bin/applets:/system/bin"
 if [ -f "${OPENCLAW_ENV}" ]; then
   . "${OPENCLAW_ENV}"
 fi
@@ -162,7 +165,7 @@ exec 2>&1
 exec openclaw gateway run
 EOF
     chmod +x "$OPENCLAW_RUN_SCRIPT"
-    tcw_ok "run script: $OPENCLAW_RUN_SCRIPT (user bin: $user_bin)"
+    tcw_ok "run script: $OPENCLAW_RUN_SCRIPT (workspace: $workspace_bin, user: $user_bin)"
 }
 
 tcw_service_up()      { sv up openclaw; }
@@ -295,8 +298,9 @@ tcw_status() {
     echo -e "${BOLD}Gateway:${RESET}"
     openclaw gateway status 2>/dev/null | grep -E "Runtime|Connectivity|Capability|Dashboard" || true
     echo
-    echo -e "${BOLD}User bin:${RESET} $USER_BIN"
-    echo -e "${BOLD}Log dir:${RESET}  $TCW_LOG_DIR"
+    echo -e "${BOLD}Workspace bin:${RESET} $WORKSPACE_BIN"
+    echo -e "${BOLD}User bin:${RESET}      $USER_BIN"
+    echo -e "${BOLD}Log dir:${RESET}       $TCW_LOG_DIR"
     echo
     echo -e "${BOLD}Patches:${RESET}"
     local svc_file shell_env_file oom_file host_env_file
