@@ -22,7 +22,7 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION="2026.08.30_01"
+VERSION="2026.08.30_02"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
@@ -198,6 +198,43 @@ tcw_env_show() {
     done
 }
 
+# ── claw-gh-install bootstrap ────────────────────────────────────────────────
+# Installs claw-gh-install as an openclaw skill so it can facilitate all
+# subsequent plugin/skill installs from GitHub without manual cloning.
+
+CGI_REPO="woodmanlegion/claw-gh-install"
+CGI_TMP="$HOME/.openclaw/workspace/claw-gh/tmp/claw-gh-install"
+CGI_BIN="$HOME/.openclaw/workspace/skills/claw-gh-install/bin/claw-gh-install"
+CGI_LINK="$WORKSPACE_BIN/claw-gh-install"
+
+tcw_bootstrap_claw_gh_install() {
+    if [[ -x "$CGI_LINK" ]]; then
+        tcw_ok "claw-gh-install already installed — skipping bootstrap"
+        return
+    fi
+
+    tcw_log "bootstrapping claw-gh-install from github:$CGI_REPO..."
+    mkdir -p "$(dirname "$CGI_TMP")"
+
+    if [[ -d "$CGI_TMP" ]]; then
+        git -C "$CGI_TMP" pull --ff-only || tcw_warn "claw-gh-install pull failed — using existing clone"
+    else
+        git clone "https://github.com/$CGI_REPO" "$CGI_TMP" || {
+            tcw_err "failed to clone $CGI_REPO — skipping claw-gh-install bootstrap"
+            return 1
+        }
+    fi
+
+    openclaw skills install "$CGI_TMP" || {
+        tcw_err "openclaw skills install failed for claw-gh-install"
+        return 1
+    }
+
+    ln -sf "$CGI_BIN" "$CGI_LINK"
+    tcw_ok "claw-gh-install installed → $CGI_LINK"
+    tcw_log "you can now install other repos with: claw-gh-install <owner/repo>"
+}
+
 # ── Install ───────────────────────────────────────────────────────────────────
 
 tcw_install() {
@@ -243,12 +280,14 @@ tcw_install() {
     tcw_ensure_env_file
     tcw_service_up
     sleep 3
+    tcw_bootstrap_claw_gh_install
     tcw_status
     tcw_ok "install complete — log: $TCW_LOG_FILE"
     tcw_warn "Next steps:"
     tcw_warn "  1. Add secrets to $OPENCLAW_ENV"
     tcw_warn "  2. Run 'openclaw onboard' for first-time config"
-    tcw_warn "  3. Run 'tclaw restart' after editing config"
+    tcw_warn "  3. Use 'claw-gh-install <owner/repo>' to install plugins and skills"
+    tcw_warn "  4. Run 'tclaw restart' after editing config"
 }
 
 # ── Update ────────────────────────────────────────────────────────────────────
@@ -434,7 +473,8 @@ tcw_help() {
     echo "  tclaw-logs            List recent tclaw operation logs"
     echo "  doctor                Run openclaw doctor"
     echo "  env                   Show .env keys (values hidden)"
-    echo "  sms-on                Enable termux-sms-channel in openclaw.json"
+    echo "  bootstrap-claw-gh     Install claw-gh-install skill (runs automatically on install)
+  sms-on                Enable termux-sms-channel in openclaw.json"
     echo "  sms-off               Disable termux-sms-channel in openclaw.json"
     echo "  sms-status            Show termux-sms-channel enabled state"
     echo "  help / ?              Show this help"
@@ -463,6 +503,7 @@ main() {
         tclaw-logs)   tcw_tclaw_logs ;;
         doctor)       tcw_doctor "$@" ;;
         env)          tcw_env_show ;;
+        bootstrap-claw-gh) tcw_bootstrap_claw_gh_install ;;
         sms-on)       tcw_sms_on ;;
         sms-off)      tcw_sms_off ;;
         sms-status)   tcw_sms_status ;;
