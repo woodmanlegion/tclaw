@@ -157,6 +157,7 @@ tcw_write_run_script() {
 #!/data/data/com.termux/files/usr/bin/sh
 export OPENCLAW_EXEC_SHELL_SNAPSHOT=0
 export OPENCLAW_CHILD_OOM_SCORE_ADJ=0
+export OPENCLAW_SUPERVISOR_MODE=external
 export PATH="${workspace_bin}:${user_bin}:${PREFIX}/bin:${PREFIX}/bin/applets:/system/bin"
 if [ -f "${OPENCLAW_ENV}" ]; then
   . "${OPENCLAW_ENV}"
