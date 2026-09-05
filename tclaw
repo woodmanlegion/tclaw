@@ -236,6 +236,50 @@ tcw_bootstrap_claw_gh_install() {
     tcw_log "you can now install other repos with: claw-gh-install <owner/repo>"
 }
 
+# ── Self-Install ────────────────────────────────────────────────────────────
+# Relocate this repo to ~/.tclaw/repo/ and symlink tclaw into USER_BIN.
+# Idempotent: skips work already done. Mirrors the claude-js wrapper model.
+
+tcw_self_install() {
+    local target_dir="$TCW_DIR/repo"
+    local target_script="$target_dir/tclaw"
+    local link="$USER_BIN/tclaw"
+
+    # 1. Relocate repo to ~/.tclaw/repo/ if not already there.
+    if [[ "$SCRIPT_DIR" == "$target_dir" ]]; then
+        tcw_log "repo already at $target_dir — skipping relocate"
+    else
+        if [[ -d "$target_dir" ]]; then
+            tcw_log "merging existing $target_dir with current $SCRIPT_DIR"
+            # Preserve .git from existing target, then rsync current over it.
+            cp -a "$SCRIPT_DIR"/* "$target_dir"/ 2>/dev/null || true
+            cp -a "$SCRIPT_DIR"/.git "$target_dir"/ 2>/dev/null || true
+        else
+            mkdir -p "$TCW_DIR"
+            cp -a "$SCRIPT_DIR" "$target_dir"
+        fi
+        tcw_ok "repo relocated to $target_dir"
+        # Re-exec from the new location so SCRIPT_DIR updates for this run.
+        exec "$target_script" install "$@"
+    fi
+
+    # 2. Symlink tclaw into USER_BIN if not already linked.
+    if [[ -L "$link" && "$(readlink -f "$link")" == "$target_script" ]]; then
+        tcw_log "symlink already in place: $link → $target_script"
+    else
+        ln -sf "$target_script" "$link"
+        tcw_ok "symlinked $link → $target_script"
+    fi
+
+    # 3. Confirm USER_BIN is on PATH.
+    if ! echo "$PATH" | tr ':' '\n' | grep -qx "$USER_BIN"; then
+        tcw_warn "$USER_BIN is not on PATH — add it to your shell rc:"
+        tcw_warn "  export PATH=\"$USER_BIN:\$PATH\""
+    else
+        tcw_ok "$USER_BIN is on PATH"
+    fi
+}
+
 # ── Install ───────────────────────────────────────────────────────────────────
 
 tcw_install() {
@@ -248,6 +292,7 @@ tcw_install() {
 
     tcw_log "running full install/setup cycle..."
     tcw_ensure_dirs
+    tcw_self_install
     tcw_need_cmd node
     tcw_need_cmd npm
     tcw_need_cmd sv
