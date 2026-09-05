@@ -238,7 +238,7 @@ tcw_bootstrap_claw_gh_install() {
 
 # ── Self-Install ────────────────────────────────────────────────────────────
 # Relocate this repo to ~/.tclaw/repo/ and symlink tclaw into USER_BIN.
-# Idempotent: skips work already done. Mirrors the claude-js wrapper model.
+# Idempotent: skips work already done. Mirrors the claude-pinned-js wrapper model.
 
 tcw_self_install() {
     local target_dir="$TCW_DIR/repo"
