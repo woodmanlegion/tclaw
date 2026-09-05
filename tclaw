@@ -238,6 +238,45 @@ tcw_write_tailscaled_run() {
     fi
 }
 
+tcw_tailscale_dns_hint_tun() {
+    echo
+    echo -e "${BOLD}── DNS: TUN mode ──────────────────────────────────────────────${RESET}"
+    echo -e "  Tailscale magic DNS is now at ${CYAN}100.100.100.100${RESET} via the TUN interface."
+    echo
+    echo -e "  ${BOLD}Step 1 — verify TUN is up:${RESET}"
+    echo -e "    ping -c1 100.100.100.100"
+    echo
+    echo -e "  ${BOLD}Step 2 — point Android at Tailscale DNS (as root):${RESET}"
+    echo -e "    su -c \"setprop net.dns1 100.100.100.100 && setprop net.dns2 1.1.1.1\""
+    echo -e "  ${YELLOW}Note: setprop is lost on reboot — tclaw-boot re-applies it.${RESET}"
+    echo
+    echo -e "  ${BOLD}Step 3 — phone Settings:${RESET}"
+    echo -e "    Network & Internet → Private DNS → set to ${CYAN}Off${RESET}"
+    echo -e "    (Private DNS overrides setprop; must be off for Tailscale DNS to win)"
+    echo
+    echo -e "  ${BOLD}Step 4 — test MagicDNS:${RESET}"
+    echo -e "    su -c \"ping -c1 YOUR-HOST.YOUR-TAILNET.ts.net\""
+    echo -e "  ${YELLOW}SOCKS5 proxy (localhost:1055) is no longer available in TUN mode.${RESET}"
+    echo
+}
+
+tcw_tailscale_dns_hint_userspace() {
+    echo
+    echo -e "${BOLD}── DNS: userspace mode ────────────────────────────────────────${RESET}"
+    echo -e "  Routing via SOCKS5 at ${CYAN}localhost:1055${RESET}. System DNS is unmanaged."
+    echo
+    echo -e "  ${BOLD}MagicDNS in Termux/curl:${RESET}"
+    echo -e "    curl --socks5-hostname 127.0.0.1:1055 http://YOUR-HOST.YOUR-TAILNET.ts.net:11434/api/tags"
+    echo
+    echo -e "  ${BOLD}Phone Settings:${RESET}"
+    echo -e "    Network & Internet → Private DNS → ${CYAN}Automatic${RESET} (or Cloudflare: 1dot1dot1dot1.cloudflare-dns.com)"
+    echo -e "    MagicDNS hostnames (*.YOUR-TAILNET.ts.net) will ${YELLOW}not${RESET} resolve system-wide."
+    echo -e "    Use Tailscale IPs (100.x.x.x) directly for non-proxied apps."
+    echo
+    echo -e "  ${BOLD}OpenClaw / ollama-fallback:${RESET} uses baseUrl with IP — no change needed."
+    echo
+}
+
 tcw_tailscale_switch() {
     local mode="$1"
     case "$mode" in
@@ -262,14 +301,13 @@ tcw_tailscale_switch() {
     sv up tailscaled
     sleep 3
     local ts_sock="$HOME/.tailscale/tailscaled.sock"
-    tailscale --socket="$ts_sock" status 2>/dev/null | head -3 || tcw_warn "tailscale status check failed — may still be starting"
+    tailscale --socket="$ts_sock" status 2>/dev/null | head -3 || \
+        tcw_warn "tailscale status check failed — may still be starting"
     tcw_ok "tailscale switched to $mode mode"
     if [[ "$mode" == "tun" ]]; then
-        tcw_warn "MagicDNS now active — set Android Private DNS to 'off' or use system DNS"
-        tcw_warn "SOCKS5 proxy (localhost:1055) is no longer available"
+        tcw_tailscale_dns_hint_tun
     else
-        tcw_warn "SOCKS5 proxy available at localhost:1055"
-        tcw_warn "MagicDNS hostnames require --socks5-hostname or proxy config"
+        tcw_tailscale_dns_hint_userspace
     fi
 }
 
@@ -364,13 +402,19 @@ tcw_setup_services() {
 
 tcw_write_boot_script() {
     mkdir -p "$BOOT_DIR"
+    local ts_mode
+    ts_mode=$(tcw_tailscale_current_mode)
+    local dns_block=""
+    if [[ "$ts_mode" == "tun" ]]; then
+        dns_block=$'\n# TUN mode: point Android DNS at Tailscale magic DNS\nsetprop net.dns1 100.100.100.100\nsetprop net.dns2 1.1.1.1'
+    fi
     cat > "$BOOT_SCRIPT" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 # tclaw-managed boot entry — do not edit manually
 # All services are managed via runit in $SVDIR
 export SVDIR=$SVDIR
 export LOGDIR=$PREFIX/var/log
-service-daemon start
+service-daemon start${dns_block}
 EOF
     chmod +x "$BOOT_SCRIPT"
     tcw_ok "boot script written: $BOOT_SCRIPT"
@@ -865,7 +909,13 @@ main() {
             case "$subcmd" in
                 tun)       tcw_tailscale_switch tun ;;
                 userspace) tcw_tailscale_switch userspace ;;
-                mode)      tcw_log "current tailscale mode: $(tcw_tailscale_current_mode)" ;;
+                mode)
+                    local cur_mode
+                    cur_mode=$(tcw_tailscale_current_mode)
+                    tcw_log "current tailscale mode: $cur_mode"
+                    if [[ "$cur_mode" == "tun" ]]; then tcw_tailscale_dns_hint_tun
+                    else tcw_tailscale_dns_hint_userspace; fi
+                    ;;
                 *)
                     local ts_sock="$HOME/.tailscale/tailscaled.sock"
                     tailscale --socket="$ts_sock" status 2>&1
