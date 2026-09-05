@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # tclaw — Termux OpenClaw Maintenance Tool
-# Version: 2026.08.29_01
+# Version: 2026.09.05_01
 # One script to install, patch, upgrade, and manage OpenClaw on Android/Termux.
 #
 # Design intent: shipped to a remote machine in one pass, then the local agent
@@ -17,12 +17,15 @@
 #   - All tclaw state lives in ~/.tclaw/ (logs, etc.)
 #   - User binaries go to the first writable XDG-style dir found on PATH:
 #     ~/.local/bin > ~/bin > ~/Scripts. Falls back to ~/.local/bin if none found.
+#   - Every invocation runs a lightweight health check across all managed
+#     services before executing the requested command. Cost is negligible;
+#     benefit is self-healing and no need to remember separate commands.
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION="2026.08.30_02"
+VERSION="2026.09.05_01"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
@@ -40,6 +43,12 @@ OPENCLAW_RUN_SCRIPT="$OPENCLAW_SERVICE_DIR/run"
 TCW_DIR="$HOME/.tclaw"
 TCW_LOG_DIR="$TCW_DIR/logs"
 TCW_LOG_FILE=""   # set by tcw_init_log
+
+BOOT_DIR="$HOME/.termux/boot"
+BOOT_SCRIPT="$BOOT_DIR/tclaw-boot"
+
+# Services managed by tclaw. Order matters for status display.
+TCW_SERVICES=(tailscaled ollama sshd vnc openclaw)
 
 # ── Terminal Styling ──────────────────────────────────────────────────────────
 
@@ -69,9 +78,6 @@ tcw_warn() { echo -e "${YELLOW}[tclaw] ⚠${RESET} $*" >&2;  _tcw_log_file "[war
 tcw_err()  { echo -e "${RED}[tclaw] ✗${RESET} $*" >&2;     _tcw_log_file "[err]  $*"; }
 
 # ── User Bin Detection ────────────────────────────────────────────────────────
-# Find the first XDG-style user bin directory that is already on PATH.
-# Precedence: ~/.local/bin > ~/bin > ~/Scripts
-# Falls back to ~/.local/bin if none are on PATH (and creates it).
 
 tcw_find_user_bin() {
     local candidates=("$HOME/.local/bin" "$HOME/bin" "$HOME/Scripts")
@@ -105,7 +111,8 @@ tcw_ensure_dirs() {
         "$HOME/.openclaw" \
         "$HOME/.pi/agent/skills/local-scripts" \
         "$TCW_LOG_DIR" \
-        "$SVDIR"
+        "$SVDIR" \
+        "$BOOT_DIR"
     tcw_ok "directories ensured (workspace bin: $WORKSPACE_BIN, user bin: $USER_BIN)"
 }
 
@@ -126,6 +133,40 @@ tcw_find_dist_file() {
     echo "$file"
 }
 
+# ── Health Check ─────────────────────────────────────────────────────────────
+# Runs on every tclaw invocation. Brings up any managed service that is down.
+# VNC gets an extra check: Xvnc may be running but xfce4-session dead.
+
+tcw_health_check() {
+    local recovered=0
+
+    for svc in "${TCW_SERVICES[@]}"; do
+        [[ ! -d "$SVDIR/$svc" ]] && continue
+        local status
+        status=$(sv status "$svc" 2>/dev/null || true)
+        if echo "$status" | grep -q "^down:"; then
+            sv up "$svc" >/dev/null 2>&1 || true
+            tcw_warn "$svc was down — brought up"
+            _tcw_log_file "[health] $svc was down, recovered"
+            recovered=$((recovered + 1))
+        fi
+    done
+
+    # VNC extra: xfce4-session may have died while Xvnc kept running
+    if sv status vnc 2>/dev/null | grep -q "^run:"; then
+        if ! pgrep -x xfce4-session >/dev/null 2>&1; then
+            DISPLAY=:1 xfce4-session >/dev/null 2>&1 &
+            disown
+            tcw_warn "xfce4-session was dead — restarted"
+            _tcw_log_file "[health] xfce4-session restarted"
+            recovered=$((recovered + 1))
+        fi
+    fi
+
+    [[ $recovered -gt 0 ]] && tcw_log "health check: $recovered service(s) recovered"
+    return 0
+}
+
 # ── Patches ───────────────────────────────────────────────────────────────────
 
 tcw_patch_all() {
@@ -143,14 +184,82 @@ tcw_patch_all() {
     tcw_ok "all patches applied"
 }
 
-# ── Service Management ────────────────────────────────────────────────────────
+# ── Service Run Scripts ───────────────────────────────────────────────────────
 
-tcw_ensure_service_dir() {
-    mkdir -p "$OPENCLAW_SERVICE_DIR"
+tcw_write_tailscaled_run() {
+    mkdir -p "$SVDIR/tailscaled"
+    cat > "$SVDIR/tailscaled/run" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+TAILSCALE_HOME="\$HOME/.tailscale"
+mkdir -p "\$TAILSCALE_HOME"
+exec tailscaled \\
+    --statedir="\$TAILSCALE_HOME" \\
+    --socket="\$TAILSCALE_HOME/tailscaled.sock" \\
+    --tun=userspace-networking \\
+    --socks5-server=localhost:1055
+EOF
+    chmod +x "$SVDIR/tailscaled/run"
+    tcw_ok "tailscaled run script written"
 }
 
-tcw_write_run_script() {
-    tcw_ensure_service_dir
+tcw_write_ollama_run() {
+    mkdir -p "$SVDIR/ollama"
+    cat > "$SVDIR/ollama/run" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+export OLLAMA_HOST="\${OLLAMA_HOST:-127.0.0.1:11434}"
+exec ollama serve
+EOF
+    chmod +x "$SVDIR/ollama/run"
+    tcw_ok "ollama run script written"
+}
+
+tcw_write_sshd_run() {
+    mkdir -p "$SVDIR/sshd"
+    cat > "$SVDIR/sshd/run" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+exec sshd -D -e
+EOF
+    chmod +x "$SVDIR/sshd/run"
+    tcw_ok "sshd run script written"
+}
+
+tcw_write_vnc_run() {
+    mkdir -p "$SVDIR/vnc"
+    cat > "$SVDIR/vnc/run" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+PREFIX=/data/data/com.termux/files/usr
+HOME=/data/data/com.termux/files/home
+
+# Clean stale locks from previous session
+rm -f "$PREFIX/tmp/.X11-unix/X1" "$PREFIX/tmp/.X1-lock" \
+      /tmp/.X1-lock "$HOME/.vnc/localhost:1.pid" 2>/dev/null
+
+# Start Xvnc
+Xvnc :1 \
+    -geometry 1920x1080 \
+    -depth 24 \
+    -rfbauth "$HOME/.vnc/passwd" \
+    -rfbport 5901 \
+    -auth "$HOME/.Xauthority" &
+XVNC_PID=$!
+
+# Give display a moment then start desktop session
+sleep 2
+DISPLAY=:1 xfce4-session &
+
+# Supervise on Xvnc — runit restarts everything if it dies
+wait $XVNC_PID
+EOF
+    chmod +x "$SVDIR/vnc/run"
+    tcw_ok "vnc run script written"
+}
+
+tcw_write_openclaw_run() {
+    mkdir -p "$OPENCLAW_SERVICE_DIR"
     local user_bin="$USER_BIN"
     local workspace_bin="$WORKSPACE_BIN"
     cat > "$OPENCLAW_RUN_SCRIPT" <<EOF
@@ -166,13 +275,78 @@ exec 2>&1
 exec openclaw gateway run
 EOF
     chmod +x "$OPENCLAW_RUN_SCRIPT"
-    tcw_ok "run script: $OPENCLAW_RUN_SCRIPT (workspace: $workspace_bin, user: $user_bin)"
+    tcw_ok "openclaw run script written"
 }
 
-tcw_service_up()      { sv up openclaw; }
-tcw_service_down()    { sv down openclaw; }
-tcw_service_restart() { sv restart openclaw; }
-tcw_service_status()  { sv status openclaw; }
+tcw_setup_services() {
+    tcw_log "writing runit service run scripts..."
+    tcw_write_tailscaled_run
+    tcw_write_ollama_run
+    tcw_write_sshd_run
+    tcw_write_vnc_run
+    tcw_write_openclaw_run
+    tcw_ok "all service run scripts written"
+}
+
+# ── Boot Script ───────────────────────────────────────────────────────────────
+# Single .termux/boot entry. Starts the runit supervisor only.
+# All services come up through runit — no per-service boot scripts needed.
+
+tcw_write_boot_script() {
+    mkdir -p "$BOOT_DIR"
+    cat > "$BOOT_SCRIPT" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+# tclaw-managed boot entry — do not edit manually
+# All services are managed via runit in $SVDIR
+export SVDIR=$SVDIR
+export LOGDIR=$PREFIX/var/log
+service-daemon start
+EOF
+    chmod +x "$BOOT_SCRIPT"
+    tcw_ok "boot script written: $BOOT_SCRIPT"
+
+    # Remove old per-service boot scripts that conflict with runit
+    local stale=(ollama sshd vnc openclaw)
+    for s in "${stale[@]}"; do
+        if [[ -f "$BOOT_DIR/$s" ]]; then
+            rm -f "$BOOT_DIR/$s"
+            tcw_warn "removed stale boot script: $BOOT_DIR/$s"
+        fi
+    done
+}
+
+# ── Service Management ────────────────────────────────────────────────────────
+
+tcw_ensure_service_dir() { mkdir -p "$OPENCLAW_SERVICE_DIR"; }
+tcw_service_up()         { sv up openclaw; }
+tcw_service_down()       { sv down openclaw; }
+tcw_service_restart()    { sv restart openclaw; }
+tcw_service_status()     { sv status openclaw; }
+
+tcw_services_status() {
+    echo
+    echo -e "${BOLD}══ services ══${RESET}"
+    for svc in "${TCW_SERVICES[@]}"; do
+        if [[ ! -d "$SVDIR/$svc" ]]; then
+            echo -e "  ${YELLOW}$svc${RESET}: no service dir"
+            continue
+        fi
+        local st
+        st=$(sv status "$svc" 2>/dev/null || echo "unknown")
+        if echo "$st" | grep -q "^run:"; then
+            echo -e "  ${GREEN}✓${RESET} $svc: $st"
+        else
+            echo -e "  ${RED}✗${RESET} $svc: $st"
+        fi
+    done
+    # VNC session extra line
+    if pgrep -x xfce4-session >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${RESET} xfce4-session: running"
+    else
+        echo -e "  ${RED}✗${RESET} xfce4-session: not running"
+    fi
+    echo
+}
 
 # ── Secrets / .env ────────────────────────────────────────────────────────────
 
@@ -182,6 +356,7 @@ tcw_ensure_env_file() {
 # OpenClaw secrets — sourced by the runit service script.
 # DISCORD_BOT_TOKEN=...
 # OPENCLAW_GATEWAY_TOKEN=...
+# OLLAMA_HOST=127.0.0.1:11434
 EOF
         chmod 600 "$OPENCLAW_ENV"
         tcw_ok "created $OPENCLAW_ENV (add your secrets)"
@@ -200,8 +375,6 @@ tcw_env_show() {
 }
 
 # ── claw-gh-install bootstrap ────────────────────────────────────────────────
-# Installs claw-gh-install as an openclaw skill so it can facilitate all
-# subsequent plugin/skill installs from GitHub without manual cloning.
 
 CGI_REPO="woodmanlegion/claw-gh-install"
 CGI_TMP="$HOME/.openclaw/workspace/claw-gh/tmp/claw-gh-install"
@@ -236,22 +409,69 @@ tcw_bootstrap_claw_gh_install() {
     tcw_log "you can now install other repos with: claw-gh-install <owner/repo>"
 }
 
-# ── Self-Install ────────────────────────────────────────────────────────────
-# Relocate this repo to ~/.tclaw/repo/ and symlink tclaw into USER_BIN.
-# Idempotent: skips work already done. Mirrors the claude-pinned-js wrapper model.
+# ── SMS Channel Install ───────────────────────────────────────────────────────
+# Clones termux-sms-channel plugin into ~/Projects/ and registers it with openclaw.
+# Skill dependencies (skill-sms-send, skill-mms-receive, skill-mms-send) must
+# be installed separately via claw-gh-install.
+
+SMS_CHANNEL_REPO="woodmanlegion/termux-sms-channel"
+SMS_CHANNEL_DIR="$HOME/Projects/termux-sms-channel"
+
+tcw_sms_channel_install() {
+    tcw_log "installing termux-sms-channel plugin..."
+
+    if [[ -d "$SMS_CHANNEL_DIR" ]]; then
+        tcw_log "updating existing clone..."
+        git -C "$SMS_CHANNEL_DIR" pull --ff-only || tcw_warn "pull failed — using existing"
+    else
+        git clone "https://github.com/$SMS_CHANNEL_REPO" "$SMS_CHANNEL_DIR" || {
+            tcw_err "failed to clone $SMS_CHANNEL_REPO"
+            return 1
+        }
+    fi
+
+    # Register plugin load path in openclaw config
+    if [[ -f "$OPENCLAW_CONFIG" ]]; then
+        python3 - <<PYEOF
+import json
+path = "$OPENCLAW_CONFIG"
+plugin_path = "$SMS_CHANNEL_DIR/plugin"
+with open(path) as f:
+    cfg = json.load(f)
+paths = cfg.setdefault("plugins", {}).setdefault("load", {}).setdefault("paths", [])
+if plugin_path not in paths:
+    paths.append(plugin_path)
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print("registered plugin path")
+else:
+    print("plugin path already registered")
+PYEOF
+    else
+        tcw_warn "openclaw.json not found — run 'openclaw setup' first, then 'tclaw sms-channel install'"
+        return 1
+    fi
+
+    tcw_ok "termux-sms-channel installed → $SMS_CHANNEL_DIR"
+    tcw_warn "Next: configure channel in openclaw.json (myNumber, allowFrom, pollIntervalMs)"
+    tcw_warn "Next: install skill dependencies via claw-gh-install:"
+    tcw_warn "  claw-gh-install woodmanlegion/skill-sms-send"
+    tcw_warn "  claw-gh-install woodmanlegion/skill-mms-receive"
+    tcw_warn "  claw-gh-install woodmanlegion/skill-mms-send"
+}
+
+# ── Self-Install ──────────────────────────────────────────────────────────────
 
 tcw_self_install() {
     local target_dir="$TCW_DIR/repo"
     local target_script="$target_dir/tclaw"
     local link="$USER_BIN/tclaw"
 
-    # 1. Relocate repo to ~/.tclaw/repo/ if not already there.
     if [[ "$SCRIPT_DIR" == "$target_dir" ]]; then
         tcw_log "repo already at $target_dir — skipping relocate"
     else
         if [[ -d "$target_dir" ]]; then
             tcw_log "merging existing $target_dir with current $SCRIPT_DIR"
-            # Preserve .git from existing target, then rsync current over it.
             cp -a "$SCRIPT_DIR"/* "$target_dir"/ 2>/dev/null || true
             cp -a "$SCRIPT_DIR"/.git "$target_dir"/ 2>/dev/null || true
         else
@@ -259,11 +479,9 @@ tcw_self_install() {
             cp -a "$SCRIPT_DIR" "$target_dir"
         fi
         tcw_ok "repo relocated to $target_dir"
-        # Re-exec from the new location so SCRIPT_DIR updates for this run.
         exec "$target_script" install "$@"
     fi
 
-    # 2. Symlink tclaw into USER_BIN if not already linked.
     if [[ -L "$link" && "$(readlink -f "$link")" == "$target_script" ]]; then
         tcw_log "symlink already in place: $link → $target_script"
     else
@@ -271,7 +489,6 @@ tcw_self_install() {
         tcw_ok "symlinked $link → $target_script"
     fi
 
-    # 3. Confirm USER_BIN is on PATH.
     if ! echo "$PATH" | tr ':' '\n' | grep -qx "$USER_BIN"; then
         tcw_warn "$USER_BIN is not on PATH — add it to your shell rc:"
         tcw_warn "  export PATH=\"$USER_BIN:\$PATH\""
@@ -303,7 +520,7 @@ tcw_install() {
 
     if [[ ! -d "$OPENCLAW_PKG" ]] || [[ "$use_fork" -eq 1 ]] || [[ "$use_latest" -eq 1 ]]; then
         if [[ "$use_fork" -eq 1 && "$use_latest" -eq 1 ]]; then
-            tcw_log "installing openclaw from fork HEAD (github:woodmanlegion/openclaw)..."
+            tcw_log "installing openclaw from fork HEAD..."
             tcw_warn "Fork patches are pre-applied — skipping post-install patch step."
             npm install -g --ignore-scripts "github:woodmanlegion/openclaw"
         elif [[ "$use_fork" -eq 1 ]]; then
@@ -322,7 +539,8 @@ tcw_install() {
     fi
 
     tcw_patch_all
-    tcw_write_run_script
+    tcw_setup_services
+    tcw_write_boot_script
     tcw_ensure_env_file
     tcw_service_up
     sleep 3
@@ -331,9 +549,10 @@ tcw_install() {
     tcw_ok "install complete — log: $TCW_LOG_FILE"
     tcw_warn "Next steps:"
     tcw_warn "  1. Add secrets to $OPENCLAW_ENV"
-    tcw_warn "  2. Run 'openclaw onboard' for first-time config"
-    tcw_warn "  3. Use 'claw-gh-install <owner/repo>' to install plugins and skills"
-    tcw_warn "  4. Run 'tclaw restart' after editing config"
+    tcw_warn "  2. Run 'openclaw setup' for first-time config"
+    tcw_warn "  3. Run 'tclaw sms-channel install' to add SMS/MMS"
+    tcw_warn "  4. Use 'claw-gh-install <owner/repo>' to install plugins and skills"
+    tcw_warn "  5. Run 'tclaw restart' after editing config"
 }
 
 # ── Update ────────────────────────────────────────────────────────────────────
@@ -361,8 +580,8 @@ tcw_update() {
     fi
 
     tcw_patch_all
-    tcw_write_run_script
-    tcw_service_restart
+    tcw_write_openclaw_run
+    sv restart openclaw
     sleep 5
     tcw_status
     tcw_ok "update complete — log: $TCW_LOG_FILE"
@@ -377,9 +596,7 @@ tcw_status() {
     echo -e "${BOLD}OpenClaw:${RESET}"
     openclaw --version 2>/dev/null || tcw_err "openclaw CLI not found"
     echo
-    echo -e "${BOLD}Service:${RESET}"
-    tcw_service_status || true
-    echo
+    tcw_services_status
     echo -e "${BOLD}Gateway:${RESET}"
     openclaw gateway status 2>/dev/null | grep -E "Runtime|Connectivity|Capability|Dashboard" || true
     echo
@@ -414,7 +631,6 @@ tcw_status() {
     else
         tcw_err "host-env-security patch missing"
     fi
-    # Playwright android patch
     local pw_file="$OPENCLAW_PKG/node_modules/playwright-core/lib/serverRegistry.js"
     if [[ -f "$pw_file" ]] && grep -q 'process.platform === "android"' "$pw_file" 2>/dev/null; then
         tcw_ok "playwright-android patch"
@@ -510,33 +726,37 @@ tcw_help() {
     echo -e "  Log dir:         ${CYAN}$TCW_LOG_DIR${RESET}"
     echo
     echo "Commands:"
-    echo "  install               Install pinned openclaw@$OPENCLAW_PINNED_VERSION + patch"
-    echo "  install --latest      Install openclaw@latest + patch (risky)"
-    echo "  install --fork        Install from woodmanlegion/openclaw fork (patches pre-applied)"
+    echo "  install                  Install pinned openclaw@$OPENCLAW_PINNED_VERSION + patch + all services"
+    echo "  install --latest         Install openclaw@latest + patch (risky)"
+    echo "  install --fork           Install from woodmanlegion/openclaw fork (patches pre-applied)"
     echo "  install --fork --latest  Install fork HEAD"
-    echo "  patch                 Apply all Termux patches to installed openclaw"
-    echo "  update                Re-install pinned version + patch + restart"
-    echo "  update --latest       Update to latest + patch + restart (risky)"
-    echo "  update --fork         Update from fork + restart"
-    echo "  status                Show service, gateway, patch, and path status"
-    echo "  start                 sv up openclaw"
-    echo "  stop                  sv down openclaw"
-    echo "  restart               sv restart openclaw"
-    echo "  logs                  Tail the openclaw gateway log"
-    echo "  tclaw-logs            List recent tclaw operation logs"
-    echo "  doctor                Run openclaw doctor"
-    echo "  env                   Show .env keys (values hidden)"
-    echo "  bootstrap-claw-gh     Install claw-gh-install skill (runs automatically on install)
-  sms-on                Enable termux-sms-channel in openclaw.json"
-    echo "  sms-off               Disable termux-sms-channel in openclaw.json"
-    echo "  sms-status            Show termux-sms-channel enabled state"
-    echo "  help / ?              Show this help"
+    echo "  patch                    Apply all Termux patches to installed openclaw"
+    echo "  update                   Re-install pinned version + patch + restart"
+    echo "  update --latest          Update to latest + patch + restart (risky)"
+    echo "  update --fork            Update from fork + restart"
+    echo "  status                   Show full status (services, gateway, patches)"
+    echo "  services                 Show all managed service statuses"
+    echo "  services setup           Write all runit run scripts + boot entry"
+    echo "  start                    sv up openclaw"
+    echo "  stop                     sv down openclaw"
+    echo "  restart                  sv restart openclaw + health check"
+    echo "  logs                     Tail the openclaw gateway log"
+    echo "  tclaw-logs               List recent tclaw operation logs"
+    echo "  doctor                   Run openclaw doctor"
+    echo "  env                      Show .env keys (values hidden)"
+    echo "  bootstrap-claw-gh        Install claw-gh-install skill"
+    echo "  sms-on                   Enable termux-sms-channel in openclaw.json"
+    echo "  sms-off                  Disable termux-sms-channel in openclaw.json"
+    echo "  sms-status               Show termux-sms-channel enabled state"
+    echo "  sms-channel install      Clone plugin + register with openclaw"
+    echo "  help / ?                 Show this help"
     echo
     echo "Key paths:"
-    echo "  $SCRIPT_DIR/tclaw     this script"
+    echo "  $SCRIPT_DIR/tclaw"
     echo "  $OPENCLAW_CONFIG"
     echo "  $OPENCLAW_ENV"
     echo "  $OPENCLAW_RUN_SCRIPT"
+    echo "  $BOOT_SCRIPT"
     echo "  $TCW_LOG_DIR"
 }
 
@@ -544,24 +764,48 @@ tcw_help() {
 
 main() {
     local cmd="${1:-help}"
+
+    # Health check runs on every command except help and install
+    # (install manages its own service lifecycle)
     case "$cmd" in
-        install)      shift; tcw_install "$@" ;;
-        patch)        tcw_init_log "patch"; tcw_patch_all ;;
-        update)       shift; tcw_update "$@" ;;
-        status)       tcw_status "$@" ;;
-        start)        tcw_service_up ;;
-        stop)         tcw_service_down ;;
-        restart)      tcw_service_restart ;;
-        logs)         tcw_logs ;;
-        tclaw-logs)   tcw_tclaw_logs ;;
-        doctor)       tcw_doctor "$@" ;;
-        env)          tcw_env_show ;;
-        bootstrap-claw-gh) tcw_bootstrap_claw_gh_install ;;
-        sms-on)       tcw_sms_on ;;
-        sms-off)      tcw_sms_off ;;
-        sms-status)   tcw_sms_status ;;
+        help|--help|-h|'?'|'/'|install) : ;;
+        *) tcw_health_check ;;
+    esac
+
+    case "$cmd" in
+        install)             shift; tcw_install "$@" ;;
+        patch)               tcw_init_log "patch"; tcw_patch_all ;;
+        update)              shift; tcw_update "$@" ;;
+        status)              tcw_status "$@" ;;
+        services)
+            shift
+            local subcmd="${1:-}"
+            case "$subcmd" in
+                setup) tcw_setup_services; tcw_write_boot_script ;;
+                *)     tcw_services_status ;;
+            esac
+            ;;
+        start)               tcw_service_up ;;
+        stop)                tcw_service_down ;;
+        restart)             tcw_service_restart ;;
+        logs)                tcw_logs ;;
+        tclaw-logs)          tcw_tclaw_logs ;;
+        doctor)              tcw_doctor "$@" ;;
+        env)                 tcw_env_show ;;
+        bootstrap-claw-gh)   tcw_bootstrap_claw_gh_install ;;
+        sms-on)              tcw_sms_on ;;
+        sms-off)             tcw_sms_off ;;
+        sms-status)          tcw_sms_status ;;
+        sms-channel)
+            shift
+            local subcmd="${1:-}"
+            case "$subcmd" in
+                install) tcw_sms_channel_install ;;
+                *)       tcw_err "unknown sms-channel subcommand: $subcmd"; tcw_help; exit 1 ;;
+            esac
+            ;;
         help|--help|-h|'?'|'/') tcw_help ;;
-        *)            tcw_err "unknown command: $cmd"; tcw_help; exit 1 ;;
+        *)                   tcw_err "unknown command: $cmd"; tcw_help; exit 1 ;;
     esac
 }
 
