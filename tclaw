@@ -414,6 +414,13 @@ tcw_status() {
     else
         tcw_err "host-env-security patch missing"
     fi
+    # Playwright android patch
+    local pw_file="$OPENCLAW_PKG/node_modules/playwright-core/lib/serverRegistry.js"
+    if [[ -f "$pw_file" ]] && grep -q 'process.platform === "android"' "$pw_file" 2>/dev/null; then
+        tcw_ok "playwright-android patch"
+    else
+        tcw_err "playwright-android patch missing"
+    fi
     echo
     echo -e "${BOLD}.env:${RESET}"
     if [[ -f "$OPENCLAW_ENV" ]]; then
