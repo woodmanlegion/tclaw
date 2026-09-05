@@ -43,6 +43,7 @@ OPENCLAW_RUN_SCRIPT="$OPENCLAW_SERVICE_DIR/run"
 TCW_DIR="$HOME/.tclaw"
 TCW_LOG_DIR="$TCW_DIR/logs"
 TCW_LOG_FILE=""   # set by tcw_init_log
+TCW_TAILSCALE_MODE_FILE="$TCW_DIR/tailscale-mode"  # persists: "userspace" or "tun"
 
 BOOT_DIR="$HOME/.termux/boot"
 BOOT_SCRIPT="$BOOT_DIR/tclaw-boot"
@@ -189,7 +190,11 @@ tcw_patch_all() {
 
 # ── Service Run Scripts ───────────────────────────────────────────────────────
 
-tcw_write_tailscaled_run() {
+tcw_tailscale_current_mode() {
+    cat "$TCW_TAILSCALE_MODE_FILE" 2>/dev/null || echo "userspace"
+}
+
+tcw_write_tailscaled_run_userspace() {
     mkdir -p "$SVDIR/tailscaled"
     cat > "$SVDIR/tailscaled/run" <<EOF
 #!/data/data/com.termux/files/usr/bin/sh
@@ -203,7 +208,69 @@ exec tailscaled \\
     --socks5-server=localhost:1055
 EOF
     chmod +x "$SVDIR/tailscaled/run"
-    tcw_ok "tailscaled run script written"
+    echo "userspace" > "$TCW_TAILSCALE_MODE_FILE"
+    tcw_ok "tailscaled run script written (mode: userspace, socks5: localhost:1055)"
+}
+
+tcw_write_tailscaled_run_tun() {
+    mkdir -p "$SVDIR/tailscaled"
+    cat > "$SVDIR/tailscaled/run" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+TAILSCALE_HOME="\$HOME/.tailscale"
+mkdir -p "\$TAILSCALE_HOME"
+exec su -c "PATH=$PREFIX/bin:\$PATH tailscaled \\
+    --statedir=\$TAILSCALE_HOME \\
+    --socket=\$TAILSCALE_HOME/tailscaled.sock" 2>&1
+EOF
+    chmod +x "$SVDIR/tailscaled/run"
+    echo "tun" > "$TCW_TAILSCALE_MODE_FILE"
+    tcw_ok "tailscaled run script written (mode: tun, DNS: 100.100.100.100)"
+}
+
+tcw_write_tailscaled_run() {
+    local mode
+    mode=$(tcw_tailscale_current_mode)
+    if [[ "$mode" == "tun" ]]; then
+        tcw_write_tailscaled_run_tun
+    else
+        tcw_write_tailscaled_run_userspace
+    fi
+}
+
+tcw_tailscale_switch() {
+    local mode="$1"
+    case "$mode" in
+        tun)
+            if [[ ! -c /dev/tun ]] && [[ ! -L /dev/net/tun ]]; then
+                tcw_err "/dev/tun not found — TUN mode requires a kernel TUN device"
+                return 1
+            fi
+            tcw_write_tailscaled_run_tun
+            ;;
+        userspace)
+            tcw_write_tailscaled_run_userspace
+            ;;
+        *)
+            tcw_err "unknown mode: $mode (use: tun or userspace)"
+            return 1
+            ;;
+    esac
+    tcw_log "restarting tailscaled in $mode mode..."
+    sv down tailscaled
+    sleep 2
+    sv up tailscaled
+    sleep 3
+    local ts_sock="$HOME/.tailscale/tailscaled.sock"
+    tailscale --socket="$ts_sock" status 2>/dev/null | head -3 || tcw_warn "tailscale status check failed — may still be starting"
+    tcw_ok "tailscale switched to $mode mode"
+    if [[ "$mode" == "tun" ]]; then
+        tcw_warn "MagicDNS now active — set Android Private DNS to 'off' or use system DNS"
+        tcw_warn "SOCKS5 proxy (localhost:1055) is no longer available"
+    else
+        tcw_warn "SOCKS5 proxy available at localhost:1055"
+        tcw_warn "MagicDNS hostnames require --socks5-hostname or proxy config"
+    fi
 }
 
 tcw_write_ollama_run() {
@@ -740,6 +807,10 @@ tcw_help() {
     echo "  status                   Show full status (services, gateway, patches)"
     echo "  services                 Show all managed service statuses"
     echo "  services setup           Write all runit run scripts + boot entry"
+    echo "  tailscale tun            Switch to TUN mode (full DNS, needs /dev/tun + root)"
+    echo "  tailscale userspace      Switch to userspace mode (SOCKS5 on localhost:1055)"
+    echo "  tailscale mode           Show current tailscale networking mode"
+    echo "  tailscale                Show tailscale status + current mode"
     echo "  start                    sv up openclaw"
     echo "  stop                     sv down openclaw"
     echo "  restart                  sv restart openclaw + health check"
@@ -786,6 +857,20 @@ main() {
             case "$subcmd" in
                 setup) tcw_setup_services; tcw_write_boot_script ;;
                 *)     tcw_services_status ;;
+            esac
+            ;;
+        tailscale)
+            shift
+            local subcmd="${1:-status}"
+            case "$subcmd" in
+                tun)       tcw_tailscale_switch tun ;;
+                userspace) tcw_tailscale_switch userspace ;;
+                mode)      tcw_log "current tailscale mode: $(tcw_tailscale_current_mode)" ;;
+                *)
+                    local ts_sock="$HOME/.tailscale/tailscaled.sock"
+                    tailscale --socket="$ts_sock" status 2>&1
+                    tcw_log "mode: $(tcw_tailscale_current_mode)"
+                    ;;
             esac
             ;;
         start)               tcw_service_up ;;
