@@ -49,7 +49,8 @@ BOOT_DIR="$HOME/.termux/boot"
 BOOT_SCRIPT="$BOOT_DIR/tclaw-boot"
 
 # Services managed by tclaw. Order matters for status display.
-TCW_SERVICES=(tailscaled ollama sshd vnc openclaw)
+# tailscaled is intentionally absent — the Android Tailscale app owns the VPN/DNS.
+TCW_SERVICES=(ollama sshd vnc openclaw)
 
 # ── Terminal Styling ──────────────────────────────────────────────────────────
 
@@ -388,7 +389,7 @@ EOF
 
 tcw_setup_services() {
     tcw_log "writing runit service run scripts..."
-    tcw_write_tailscaled_run
+    # tailscaled intentionally omitted — Android app owns VPN/DNS
     tcw_write_ollama_run
     tcw_write_sshd_run
     tcw_write_vnc_run
@@ -420,7 +421,7 @@ EOF
     tcw_ok "boot script written: $BOOT_SCRIPT"
 
     # Remove old per-service boot scripts that conflict with runit
-    local stale=(ollama sshd vnc openclaw)
+    local stale=(tailscaled ollama sshd vnc openclaw)
     for s in "${stale[@]}"; do
         if [[ -f "$BOOT_DIR/$s" ]]; then
             rm -f "$BOOT_DIR/$s"
@@ -440,6 +441,12 @@ tcw_service_status()     { sv status openclaw; }
 tcw_services_status() {
     echo
     echo -e "${BOLD}══ services ══${RESET}"
+    # Tailscale: show Android app status (not runit-managed)
+    if ping -c1 -W1 100.100.100.100 >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${RESET} tailscale: Android app — MagicDNS active"
+    else
+        echo -e "  ${RED}✗${RESET} tailscale: Android app — not connected (open Tailscale app)"
+    fi
     for svc in "${TCW_SERVICES[@]}"; do
         if [[ ! -d "$SVDIR/$svc" ]]; then
             echo -e "  ${YELLOW}$svc${RESET}: no service dir"
