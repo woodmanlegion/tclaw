@@ -153,13 +153,16 @@ tcw_health_check() {
     done
 
     # VNC extra: xfce4-session may have died while Xvnc kept running
+    # Only restart if Xvnc is up AND the display socket is reachable
     if sv status vnc 2>/dev/null | grep -q "^run:"; then
         if ! pgrep -x xfce4-session >/dev/null 2>&1; then
-            DISPLAY=:1 xfce4-session >/dev/null 2>&1 &
-            disown
-            tcw_warn "xfce4-session was dead — restarted"
-            _tcw_log_file "[health] xfce4-session restarted"
-            recovered=$((recovered + 1))
+            if DISPLAY=:1 xdpyinfo >/dev/null 2>&1; then
+                DISPLAY=:1 xfce4-session >/dev/null 2>&1 &
+                disown
+                tcw_warn "xfce4-session was dead — restarted"
+                _tcw_log_file "[health] xfce4-session restarted"
+                recovered=$((recovered + 1))
+            fi
         fi
     fi
 
