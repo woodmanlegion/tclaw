@@ -154,15 +154,15 @@ tcw_health_check() {
         fi
     done
 
-    # VNC extra: xfce4-session may have died while Xvnc kept running
-    # Only restart if Xvnc is up AND the display socket is reachable
+    # VNC extra: check xfwm4 (window manager) as the desktop liveness signal.
+    # xfce4-session exits after launching its children — xfwm4 is what stays running.
     if sv status vnc 2>/dev/null | grep -q "^run:"; then
-        if ! pgrep -x xfce4-session >/dev/null 2>&1; then
+        if ! pgrep -x xfwm4 >/dev/null 2>&1; then
             if DISPLAY=:1 XAUTHORITY="$HOME/.Xauthority" xdpyinfo >/dev/null 2>&1; then
                 DISPLAY=:1 XAUTHORITY="$HOME/.Xauthority" xfce4-session >/dev/null 2>&1 &
                 disown
-                tcw_warn "xfce4-session was dead — restarted"
-                _tcw_log_file "[health] xfce4-session restarted"
+                tcw_warn "desktop (xfwm4) was dead — restarted xfce4-session"
+                _tcw_log_file "[health] xfwm4 dead, restarted xfce4-session"
                 recovered=$((recovered + 1))
             fi
         fi
@@ -344,9 +344,23 @@ PREFIX=/data/data/com.termux/files/usr
 HOME=/data/data/com.termux/files/home
 XAUTHORITY="$HOME/.Xauthority"
 
-# Clean stale locks from previous session
+# Kill any orphaned Xvnc and desktop from a previous run
+pkill -9 -f "Xvnc :1" 2>/dev/null
+pkill -9 -f "xfce4-session" 2>/dev/null
+pkill -9 -f "xfwm4" 2>/dev/null
+sleep 1
+
+# Clean stale locks
 rm -f "$PREFIX/tmp/.X11-unix/X1" "$PREFIX/tmp/.X1-lock" \
       /tmp/.X1-lock "$HOME/.vnc/localhost:1.pid" 2>/dev/null
+
+# Ensure full cleanup when runit stops this script
+cleanup() {
+    pkill -9 -f "Xvnc :1" 2>/dev/null
+    pkill -9 -f "xfce4-session" 2>/dev/null
+    pkill -9 -f "xfwm4" 2>/dev/null
+}
+trap cleanup EXIT TERM INT
 
 # Start Xvnc
 Xvnc :1 \
@@ -357,11 +371,11 @@ Xvnc :1 \
     -auth "$XAUTHORITY" &
 XVNC_PID=$!
 
-# Give display a moment then start desktop session
+# Give display a moment then start desktop
 sleep 3
 DISPLAY=:1 XAUTHORITY="$XAUTHORITY" xfce4-session &
 
-# Supervise on Xvnc — runit restarts everything if it dies
+# runit supervises via Xvnc — if it dies, everything restarts
 wait $XVNC_PID
 EOF
     chmod +x "$SVDIR/vnc/run"
@@ -461,11 +475,11 @@ tcw_services_status() {
             echo -e "  ${RED}✗${RESET} $svc: $st"
         fi
     done
-    # VNC session extra line
-    if pgrep -x xfce4-session >/dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${RESET} xfce4-session: running"
+    # Desktop liveness: xfwm4 is the persistent signal (xfce4-session exits after launch)
+    if pgrep -x xfwm4 >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${RESET} desktop (xfwm4): running"
     else
-        echo -e "  ${RED}✗${RESET} xfce4-session: not running"
+        echo -e "  ${RED}✗${RESET} desktop (xfwm4): not running"
     fi
     echo
 }
