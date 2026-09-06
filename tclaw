@@ -575,13 +575,23 @@ plugin_path = "$SMS_CHANNEL_DIR/plugin"
 with open(path) as f:
     cfg = json.load(f)
 paths = cfg.setdefault("plugins", {}).setdefault("load", {}).setdefault("paths", [])
+changed = False
 if plugin_path not in paths:
     paths.append(plugin_path)
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2)
+    changed = True
     print("registered plugin path")
 else:
     print("plugin path already registered")
+entries = cfg.setdefault("plugins", {}).setdefault("entries", {})
+if not entries.get("termux-sms-channel", {}).get("enabled"):
+    entries["termux-sms-channel"] = {"enabled": True}
+    changed = True
+    print("trusted plugin in plugins.entries")
+else:
+    print("plugin trust already set")
+if changed:
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
 PYEOF
     else
         tcw_warn "openclaw.json not found — run 'openclaw setup' first, then 'tclaw sms-channel install'"
