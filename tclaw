@@ -546,12 +546,12 @@ tcw_bootstrap_claw_gh_install() {
 }
 
 # ── SMS Channel Install ───────────────────────────────────────────────────────
-# Clones termux-sms-channel plugin into ~/Projects/ and registers it with openclaw.
+# Clones termux-sms-channel plugin into ~/.openclaw/workspace/skills/ and registers it with openclaw.
 # Skill dependencies (skill-sms-send, skill-mms-receive, skill-mms-send) must
 # be installed separately via claw-gh-install.
 
 SMS_CHANNEL_REPO="woodmanlegion/termux-sms-channel"
-SMS_CHANNEL_DIR="$HOME/Projects/termux-sms-channel"
+SMS_CHANNEL_DIR="$HOME/.openclaw/workspace/skills/termux-sms-channel"
 
 tcw_sms_channel_install() {
     tcw_log "installing termux-sms-channel plugin..."
@@ -598,7 +598,7 @@ PYEOF
         return 1
     fi
 
-    tcw_ok "termux-sms-channel installed → $SMS_CHANNEL_DIR"
+    tcw_ok "termux-sms-channel installed → $SMS_CHANNEL_DIR/plugin"
     tcw_warn "Next: configure channel in openclaw.json (myNumber, allowFrom, pollIntervalMs)"
     tcw_warn "Next: install skill dependencies via claw-gh-install:"
     tcw_warn "  claw-gh-install woodmanlegion/skill-sms-send"
