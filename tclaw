@@ -609,12 +609,12 @@ PYEOF
 # ── Self-Install ──────────────────────────────────────────────────────────────
 
 tcw_self_install() {
-    local target_dir="$TCW_DIR/repo"
+    local target_dir="$TCW_DIR/src"
     local target_script="$target_dir/tclaw"
     local link="$USER_BIN/tclaw"
 
     if [[ "$SCRIPT_DIR" == "$target_dir" ]]; then
-        tcw_log "repo already at $target_dir — skipping relocate"
+        tcw_log "src already at $target_dir — skipping relocate"
     else
         if [[ -d "$target_dir" ]]; then
             tcw_log "merging existing $target_dir with current $SCRIPT_DIR"
@@ -624,7 +624,7 @@ tcw_self_install() {
             mkdir -p "$TCW_DIR"
             cp -a "$SCRIPT_DIR" "$target_dir"
         fi
-        tcw_ok "repo relocated to $target_dir"
+        tcw_ok "src relocated to $target_dir"
         exec "$target_script" install "$@"
     fi
 
