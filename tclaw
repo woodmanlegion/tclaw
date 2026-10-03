@@ -312,32 +312,66 @@ tcw_tailscale_switch() {
     fi
 }
 
+# tcw_write_run_script <target-path>
+# Reads the intended content from stdin. If <target-path> already exists
+# and differs from the intended content, backs it up to
+# <target-path>.bak.<timestamp> and warns, before overwriting -- so a
+# prior customization (hand-edited, or written by something other than
+# tclaw, e.g. a package's own bundled service definition) is never
+# silently destroyed. If the existing content is identical, the write
+# is skipped entirely (no needless churn). Returns 0 if the file was
+# left unchanged, 1 if it was written (new or changed).
+tcw_write_run_script() {
+    local target="$1"
+    local tmp
+    tmp="$(mktemp)"
+    cat > "$tmp"
+    if [[ -f "$target" ]]; then
+        if cmp -s "$tmp" "$target"; then
+            rm -f "$tmp"
+            return 0
+        fi
+        local backup="${target}.bak.$(date +%Y%m%d-%H%M%S)"
+        cp "$target" "$backup"
+        tcw_warn "existing run script at $target differs from tclaw's -- backed up to $backup before overwriting"
+    fi
+    mv "$tmp" "$target"
+    chmod +x "$target"
+    return 1
+}
+
 tcw_write_ollama_run() {
     mkdir -p "$SVDIR/ollama"
-    cat > "$SVDIR/ollama/run" <<EOF
+    if tcw_write_run_script "$SVDIR/ollama/run" <<EOF
 #!/data/data/com.termux/files/usr/bin/sh
 exec 2>&1
 export OLLAMA_HOST="\${OLLAMA_HOST:-127.0.0.1:11434}"
 exec ollama serve
 EOF
-    chmod +x "$SVDIR/ollama/run"
-    tcw_ok "ollama run script written"
+    then
+        tcw_ok "ollama run script unchanged"
+    else
+        tcw_ok "ollama run script written"
+    fi
 }
 
 tcw_write_sshd_run() {
     mkdir -p "$SVDIR/sshd"
-    cat > "$SVDIR/sshd/run" <<EOF
+    if tcw_write_run_script "$SVDIR/sshd/run" <<EOF
 #!/data/data/com.termux/files/usr/bin/sh
 exec 2>&1
 exec sshd -D -e
 EOF
-    chmod +x "$SVDIR/sshd/run"
-    tcw_ok "sshd run script written"
+    then
+        tcw_ok "sshd run script unchanged"
+    else
+        tcw_ok "sshd run script written"
+    fi
 }
 
 tcw_write_vnc_run() {
     mkdir -p "$SVDIR/vnc"
-    cat > "$SVDIR/vnc/run" <<'EOF'
+    if tcw_write_run_script "$SVDIR/vnc/run" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 exec 2>&1
 PREFIX=/data/data/com.termux/files/usr
@@ -378,15 +412,18 @@ DISPLAY=:1 XAUTHORITY="$XAUTHORITY" xfce4-session &
 # runit supervises via Xvnc — if it dies, everything restarts
 wait $XVNC_PID
 EOF
-    chmod +x "$SVDIR/vnc/run"
-    tcw_ok "vnc run script written"
+    then
+        tcw_ok "vnc run script unchanged"
+    else
+        tcw_ok "vnc run script written"
+    fi
 }
 
 tcw_write_openclaw_run() {
     mkdir -p "$OPENCLAW_SERVICE_DIR"
     local user_bin="$USER_BIN"
     local workspace_bin="$WORKSPACE_BIN"
-    cat > "$OPENCLAW_RUN_SCRIPT" <<EOF
+    if tcw_write_run_script "$OPENCLAW_RUN_SCRIPT" <<EOF
 #!/data/data/com.termux/files/usr/bin/sh
 export OPENCLAW_EXEC_SHELL_SNAPSHOT=0
 export OPENCLAW_CHILD_OOM_SCORE_ADJ=0
@@ -398,8 +435,11 @@ fi
 exec 2>&1
 exec openclaw gateway run
 EOF
-    chmod +x "$OPENCLAW_RUN_SCRIPT"
-    tcw_ok "openclaw run script written"
+    then
+        tcw_ok "openclaw run script unchanged"
+    else
+        tcw_ok "openclaw run script written"
+    fi
 }
 
 tcw_setup_services() {
