@@ -29,7 +29,7 @@ VERSION="2026.09.05_01"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
-SVDIR="${SVDIR:-$PREFIX/var/service}"
+export SVDIR="${SVDIR:-$PREFIX/var/service}"
 
 OPENCLAW_PINNED_VERSION="2026.7.1-2"
 OPENCLAW_PKG="$PREFIX/lib/node_modules/openclaw"
@@ -144,6 +144,12 @@ tcw_health_check() {
 
     for svc in "${TCW_SERVICES[@]}"; do
         [[ ! -d "$SVDIR/$svc" ]] && continue
+        # vnc is optional and depends on Xvnc actually being installed (it
+        # isn't by default) -- never auto-heal it just because a service
+        # directory happens to exist. See tcw_write_vnc_run's own guard.
+        if [[ "$svc" == "vnc" ]] && ! command -v Xvnc >/dev/null 2>&1; then
+            continue
+        fi
         local status
         status=$(sv status "$svc" 2>/dev/null || true)
         if echo "$status" | grep -q "^down:"; then
@@ -447,7 +453,16 @@ tcw_setup_services() {
     # tailscaled intentionally omitted — Android app owns VPN/DNS
     tcw_write_ollama_run
     tcw_write_sshd_run
-    tcw_write_vnc_run
+    # vnc is optional and depends on Xvnc, which is NOT installed by default
+    # (tclaw's apt_pkgs list doesn't include it). Writing and health-checking
+    # a vnc run script with no Xvnc binary just crash-loops it. Only set it
+    # up if Xvnc is already present; otherwise skip with an explicit note
+    # rather than silently install something broken.
+    if command -v Xvnc >/dev/null 2>&1; then
+        tcw_write_vnc_run
+    else
+        tcw_log "Xvnc not installed — skipping vnc service (install a VNC server package, e.g. tigervnc, then re-run to enable it)"
+    fi
     tcw_write_openclaw_run
     tcw_ok "all service run scripts written"
 }
