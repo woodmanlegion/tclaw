@@ -503,7 +503,18 @@ EOF
 # ── Service Management ────────────────────────────────────────────────────────
 
 tcw_ensure_service_dir() { mkdir -p "$OPENCLAW_SERVICE_DIR"; }
-tcw_service_up()         { sv up openclaw; }
+tcw_service_up() {
+    # runsvdir polls for new service directories on an interval -- calling
+    # sv up immediately after writing a fresh run script races that poll
+    # and fails with "unable to open supervise/ok: file does not exist".
+    # Found during a real teardown/reinstall cycle, 2026-10-03.
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -e "$OPENCLAW_SERVICE_DIR/supervise/ok" ]] && break
+        sleep 1
+    done
+    sv up openclaw
+}
 tcw_service_down()       { sv down openclaw; }
 tcw_service_restart()    { sv restart openclaw; }
 tcw_service_status()     { sv status openclaw; }
