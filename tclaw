@@ -941,6 +941,77 @@ print(cfg.get('channels', {}).get('termux-sms-channel', {}).get('enabled', False
     fi
 }
 
+# -- Eavesdrop tap --------------------------------------------------------------
+# A stateful on/off handoff for termux-sms-channel's /eavesdrop/events SSE
+# stream (see that repo's eavesdrop/README.md for what the stream itself
+# carries). tclaw owns starting/stopping the background curl and tracking
+# its pid -- not something an agent should hand-roll with ad hoc
+# ssh+curl+background-task juggling each session, which is exactly how
+# this got noticed as missing in the first place.
+
+TAP_DIR="$TCW_DIR/tap"
+TAP_PID_FILE="$TAP_DIR/pid"
+TAP_LOG_FILE="$TAP_DIR/eavesdrop.log"
+
+tcw_tap_gateway_port() {
+    python3 -c "
+import json
+try:
+    with open('$OPENCLAW_CONFIG') as f:
+        cfg = json.load(f)
+    print(cfg.get('gateway', {}).get('port', 18789))
+except Exception:
+    print(18789)
+" 2>/dev/null || echo 18789
+}
+
+tcw_tap_running() {
+    [[ -f "$TAP_PID_FILE" ]] && kill -0 "$(cat "$TAP_PID_FILE" 2>/dev/null)" 2>/dev/null
+}
+
+tcw_tap_on() {
+    if ! tcw_sms_installed; then
+        tcw_warn "termux-sms-channel not installed -- run 'tclaw sms-channel install' first"
+        return 1
+    fi
+    mkdir -p "$TAP_DIR"
+    if tcw_tap_running; then
+        tcw_log "tap already on (pid $(cat "$TAP_PID_FILE")) -- log: $TAP_LOG_FILE"
+        return 0
+    fi
+    local port
+    port=$(tcw_tap_gateway_port)
+    nohup curl -N -s "http://127.0.0.1:${port}/eavesdrop/events" >> "$TAP_LOG_FILE" 2>&1 &
+    disown
+    echo "$!" > "$TAP_PID_FILE"
+    tcw_ok "tap on (pid $!, port $port) -- log: $TAP_LOG_FILE"
+}
+
+tcw_tap_off() {
+    if ! tcw_tap_running; then
+        rm -f "$TAP_PID_FILE"
+        tcw_log "tap already off"
+        return 0
+    fi
+    local pid
+    pid=$(cat "$TAP_PID_FILE")
+    kill "$pid" 2>/dev/null || true
+    rm -f "$TAP_PID_FILE"
+    tcw_ok "tap off (was pid $pid)"
+}
+
+tcw_tap_status() {
+    if tcw_tap_running; then
+        tcw_ok "tap on (pid $(cat "$TAP_PID_FILE"))"
+        local lines
+        lines=$(wc -l < "$TAP_LOG_FILE" 2>/dev/null || echo 0)
+        tcw_log "log: $TAP_LOG_FILE ($lines lines)"
+    else
+        tcw_log "tap off"
+    fi
+}
+
+
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 tcw_help() {
@@ -977,6 +1048,9 @@ tcw_help() {
     echo "  sms-off                  Disable termux-sms-channel in openclaw.json"
     echo "  sms-status               Show termux-sms-channel enabled state"
     echo "  sms-channel install      Clone plugin + register with openclaw"
+    echo "  tap on                   Start watching termux-sms-channel's eavesdrop SSE stream"
+    echo "  tap off                  Stop watching"
+    echo "  tap status               Show tap on/off + log path"
     echo "  help / ?                 Show this help"
     echo
     echo "Key paths:"
@@ -1050,6 +1124,16 @@ main() {
             case "$subcmd" in
                 install) tcw_sms_channel_install ;;
                 *)       tcw_err "unknown sms-channel subcommand: $subcmd"; tcw_help; exit 1 ;;
+            esac
+            ;;
+        tap)
+            shift
+            local subcmd="${1:-status}"
+            case "$subcmd" in
+                on)     tcw_tap_on ;;
+                off)    tcw_tap_off ;;
+                status) tcw_tap_status ;;
+                *)      tcw_err "unknown tap subcommand: $subcmd"; tcw_help; exit 1 ;;
             esac
             ;;
         help|--help|-h|'?'|'/') tcw_help ;;
