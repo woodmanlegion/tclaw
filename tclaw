@@ -666,10 +666,8 @@ PYEOF
 
     tcw_ok "termux-sms-channel installed → $SMS_CHANNEL_DIR/plugin"
     tcw_warn "Next: configure channel in openclaw.json (myNumber, allowFrom, pollIntervalMs)"
-    tcw_warn "Next: install skill dependencies via claw-gh-install:"
-    tcw_warn "  claw-gh-install woodmanlegion/skill-sms-send"
-    tcw_warn "  claw-gh-install woodmanlegion/skill-mms-receive"
-    tcw_warn "  claw-gh-install woodmanlegion/skill-mms-send"
+    tcw_warn "Next: install termux-sms (send/receive dependency, formerly 3 separate skills):"
+    tcw_warn "  git clone https://github.com/woodmanlegion/termux-sms ~/termux-sms && bash ~/termux-sms/install.sh"
 }
 
 # ── Self-Install ──────────────────────────────────────────────────────────────
