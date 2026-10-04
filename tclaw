@@ -665,8 +665,22 @@ PYEOF
     fi
 
     tcw_ok "termux-sms-channel installed → $SMS_CHANNEL_DIR/plugin"
+
+    # Register the handler script with termux-sms's poller -- this is
+    # what makes the channel a *consumer* of termux-sms-poll instead of
+    # polling the SIM itself (as of 2026-10-04, the channel no longer
+    # polls at all; see runtime-setter.js's own comment on this). Safe to
+    # do even if termux-sms isn't installed yet -- this just pre-creates
+    # the handlers.d/ directory and drops the symlink in; termux-sms's
+    # own install.sh re-creating that directory later is a no-op either
+    # way, so install order between the two doesn't matter.
+    local handlers_dir="$HOME/.config/termux-sms/handlers.d"
+    mkdir -p "$handlers_dir"
+    ln -sf "$SMS_CHANNEL_DIR/bin/termux-sms-channel-handler" "$handlers_dir/termux-sms-channel-handler"
+    tcw_ok "registered handler: $handlers_dir/termux-sms-channel-handler"
+
     tcw_warn "Next: configure channel in openclaw.json (myNumber, allowFrom, pollIntervalMs)"
-    tcw_warn "Next: install termux-sms (send/receive dependency, formerly 3 separate skills):"
+    tcw_warn "Next: install termux-sms if not already present (the handler above needs its poller running):"
     tcw_warn "  git clone https://github.com/woodmanlegion/termux-sms ~/termux-sms && bash ~/termux-sms/install.sh"
 }
 
