@@ -888,10 +888,20 @@ tcw_doctor() {
 }
 
 # ── SMS Channel Toggle ────────────────────────────────────────────────────────
+# Latent until termux-sms-channel is actually installed -- tclaw doesn't
+# assume the plugin exists just because it knows how to talk to it.
+# Installing the plugin (tclaw sms-channel install) is what activates
+# these; it is not the other way around. Not mutually dependent.
+
+tcw_sms_installed() { [[ -d "$SMS_CHANNEL_DIR" ]]; }
 
 tcw_sms_set() {
     local state="$1"
     local label="$2"
+    if ! tcw_sms_installed; then
+        tcw_warn "termux-sms-channel not installed -- run 'tclaw sms-channel install' first"
+        return 1
+    fi
     if [[ ! -f "$OPENCLAW_CONFIG" ]]; then
         tcw_err "openclaw.json not found: $OPENCLAW_CONFIG"
         return 1
@@ -912,6 +922,10 @@ PYEOF
 tcw_sms_on()     { tcw_sms_set true  on;  }
 tcw_sms_off()    { tcw_sms_set false off; }
 tcw_sms_status() {
+    if ! tcw_sms_installed; then
+        tcw_log "termux-sms-channel: not installed (run 'tclaw sms-channel install' to add it)"
+        return 0
+    fi
     if [[ ! -f "$OPENCLAW_CONFIG" ]]; then
         tcw_warn "openclaw.json not found"; return 1
     fi
