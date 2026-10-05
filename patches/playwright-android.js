@@ -30,14 +30,16 @@ const TARGET_FILES = [
 const LINUX_CHECK = /process\.platform === "linux"(?!\s*\|\|\s*process\.platform === "android")/g;
 const REPLACEMENT = '(process.platform === "linux" || process.platform === "android")';
 
-export function find(distDir) {
-  // distDir is $OPENCLAW_PKG/dist — package root is its parent
-  const pkgRoot = path.dirname(distDir);
-  for (const rel of TARGET_FILES) {
-    const full = path.join(pkgRoot, rel);
-    if (fs.existsSync(full)) return full;
-  }
-  // If none exist, return a sentinel — apply() will report no-op
+export function find() {
+  // Always hand off to applyMulti() via the sentinel -- this patch touches
+  // up to three *separate* files in the same playwright-core install, not
+  // alternates of each other. Returning the first existing one as a plain
+  // path (the original bug here) sends the engine down the single-file
+  // branch instead, which only ever checks that one file and leaves the
+  // other two -- including serverRegistry.js, where the real unpatched
+  // "Unsupported platform: android" throw actually lives -- untouched.
+  // applyMulti() already does its own per-file existence check, so no
+  // existence check belongs here at all.
   return "__multi__";
 }
 
